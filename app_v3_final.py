@@ -8,6 +8,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 import os
 import json
+import io
 from pathlib import Path
 
 # ============= CONFIG =============
@@ -44,6 +45,32 @@ def formato_cronometro(segundos):
     m = int((segundos % 3600) // 60)
     s = int(segundos % 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
+
+def calcular_horas_semanales(df_usuario):
+    """Calcula horas por semana (semana ISO: lunes a domingo)"""
+    if df_usuario.empty:
+        return pd.DataFrame()
+    
+    df_usuario['Fecha'] = pd.to_datetime(df_usuario['Fecha'])
+    df_usuario['Semana'] = df_usuario['Fecha'].dt.isocalendar().week
+    df_usuario['Año'] = df_usuario['Fecha'].dt.year
+    
+    horas_por_semana = df_usuario.groupby(['Año', 'Semana']).agg({
+        'Horas': 'sum',
+        'Fecha': ['min', 'max', 'count']
+    }).round(2)
+    
+    horas_por_semana.columns = ['Total_Horas', 'Fecha_Inicio', 'Fecha_Fin', 'Jornadas']
+    horas_por_semana['Extras'] = (horas_por_semana['Total_Horas'] - 40).apply(lambda x: max(0, x))
+    horas_por_semana['Deficit'] = (40 - horas_por_semana['Total_Horas']).apply(lambda x: max(0, x))
+    horas_por_semana['Estado'] = horas_por_semana.apply(
+        lambda row: f"+{row['Extras']:.2f}h extras" if row['Extras'] > 0 
+        else f"-{row['Deficit']:.2f}h falta" if row['Deficit'] > 0 
+        else "✅ 40h exactas",
+        axis=1
+    )
+    
+    return horas_por_semana.reset_index()
 
 # Ubicaciones típicas de TopRedesValencia
 UBICACIONES = [
@@ -181,7 +208,7 @@ else:
     
     # ============= PANEL ADMIN =============
     if st.session_state.es_admin:
-        tab_usuarios, tab_registros = st.tabs(["👥 Gestión de Usuarios", "📊 Ver Registros"])
+        tab_usuarios, tab_registros, tab_semanal = st.tabs(["👥 Gestión de Usuarios", "📊 Ver Registros", "⏱️ Control Semanal"])
         
         with tab_usuarios:
             st.markdown("### 👥 Usuarios Registrados")
@@ -241,36 +268,230 @@ else:
                         st.error("⚠️ Completa todos los campos")
         
         with tab_registros:
-            st.markdown("### 📊 Registros de Jornadas")
+            st.markdown("### 📊 Registros de Jornadas - Todos los Usuarios")
             
             usuarios = cargar_usuarios()
             usuarios_lista = [u for u in usuarios.keys() if u != "ADMIN"]
             
             if usuarios_lista:
-                usuario_sel = st.selectbox(
-                    "Selecciona un usuario",
-                    usuarios_lista,
-                    key="admin_select_usuario"
-                )
+                # Opción 1: Ver todos o filtrar
+                tab_todos, tab_individual = st.tabs(["👥 Todos los Usuarios", "👤 Usuario Individual"])
                 
-                df = cargar_datos_usuario(usuario_sel)
-                
-                if not df.empty:
-                    st.dataframe(df, use_container_width=True)
+                with tab_todos:
+                    st.markdown("#### 📋 Todas las Jornadas Registradas")
                     
-                    # Estadísticas
-                    col1, col2, col3 = st.columns(3)
-                    col1.metric("📋 Total Jornadas", len(df))
-                    col2.metric("⏱️ Total Horas", f"{df['Horas'].sum():.2f}h")
-                    col3.metric("📊 Promedio Diario", f"{df['Horas'].mean():.2f}h")
-                else:
-                    st.info(f"Sin jornadas registradas para {usuario_sel}")
+                    # Combinar datos de todos los usuarios
+                    todos_datos = []
+                    for usuario in usuarios_lista:
+                        df_usuario = cargar_datos_usuario(usuario)
+                        if not df_usuario.empty:
+                            df_usuario['Usuario'] = usuario
+                            todos_datos.append(df_usuario)
+                    
+                    if todos_datos:
+                        df_combinado = pd.concat(todos_datos, ignore_index=True)
+                        
+                        # Reorganizar columnas
+                        columnas_orden = ['Usuario', 'Fecha', 'Entrada', 'Salida', 'Horas', 'Ubicacion']
+                        df_combinado = df_combinado[columnas_orden]
+                        
+                        # Ordenar por fecha descendente
+                        df_combinado = df_combinado.sort_values('Fecha', ascending=False)
+                        
+                        # Mostrar tabla
+                        st.dataframe(df_combinado, use_container_width=True, hide_index=True)
+                        
+                        st.divider()
+                        
+                        # Estadísticas globales
+                        col1, col2, col3, col4 = st.columns(4)
+                        col1.metric("👥 Usuarios Activos", len(usuarios_lista))
+                        col2.metric("📋 Total Jornadas", len(df_combinado))
+                        col3.metric("⏱️ Total Horas", f"{df_combinado['Horas'].sum():.2f}h")
+                        col4.metric("📊 Promedio por Jornada", f"{df_combinado['Horas'].mean():.2f}h")
+                        
+                        st.divider()
+                        
+                        # Estadísticas por usuario
+                        st.markdown("#### 📊 Resumen por Usuario")
+                        resumen_usuarios = df_combinado.groupby('Usuario').agg({
+                            'Horas': ['sum', 'count', 'mean']
+                        }).round(2)
+                        resumen_usuarios.columns = ['Total Horas', 'Jornadas', 'Promedio']
+                        st.dataframe(resumen_usuarios, use_container_width=True)
+                        
+                        st.divider()
+                        
+                        # Descargar Excel
+                        col_excel, col_espacio = st.columns([1, 2])
+                        with col_excel:
+                            excel_buffer = io.BytesIO()
+                            with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                                df_combinado.to_excel(writer, sheet_name='Jornadas', index=False)
+                                resumen_usuarios.to_excel(writer, sheet_name='Resumen')
+                            excel_buffer.seek(0)
+                            
+                            st.download_button(
+                                label="📥 Descargar Excel Completo",
+                                data=excel_buffer,
+                                file_name=f"jornadas_todas_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            )
+                    else:
+                        st.info("Sin jornadas registradas aún")
+                
+                with tab_individual:
+                    st.markdown("#### 👤 Filtrar por Usuario")
+                    
+                    usuario_sel = st.selectbox(
+                        "Selecciona un usuario",
+                        usuarios_lista,
+                        key="admin_select_usuario"
+                    )
+                    
+                    df = cargar_datos_usuario(usuario_sel)
+                    
+                    if not df.empty:
+                        st.dataframe(df, use_container_width=True, hide_index=True)
+                        
+                        # Estadísticas individuales
+                        col1, col2, col3 = st.columns(3)
+                        col1.metric("📋 Total Jornadas", len(df))
+                        col2.metric("⏱️ Total Horas", f"{df['Horas'].sum():.2f}h")
+                        col3.metric("📊 Promedio Diario", f"{df['Horas'].mean():.2f}h")
+                        
+                        st.divider()
+                        
+                        # Descargar individual
+                        excel_buffer = io.BytesIO()
+                        df.to_excel(excel_buffer, sheet_name='Jornadas', index=False)
+                        excel_buffer.seek(0)
+                        
+                        st.download_button(
+                            label=f"📥 Descargar Excel de {usuario_sel}",
+                            data=excel_buffer,
+                            file_name=f"jornadas_{usuario_sel}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                    else:
+                        st.info(f"Sin jornadas registradas para {usuario_sel}")
             else:
                 st.info("No hay usuarios disponibles (solo admin)")
-    
-    # ============= PANEL USUARIO NORMAL =============
+        
+        with tab_semanal:
+            st.markdown("### ⏱️ Control de Horas Semanales (40h/semana)")
+            
+            usuarios = cargar_usuarios()
+            usuarios_lista = [u for u in usuarios.keys() if u != "ADMIN"]
+            
+            if usuarios_lista:
+                # Opción 1: Ver todos o filtrar
+                tab_todas_sem, tab_usuario_sem = st.tabs(["👥 Resumen Global", "👤 Por Usuario"])
+                
+                with tab_todas_sem:
+                    st.markdown("#### 📊 Resumen Semanal de Todos los Usuarios")
+                    
+                    # Compilar datos de todas las semanas de todos los usuarios
+                    todas_semanas = []
+                    for usuario in usuarios_lista:
+                        df = cargar_datos_usuario(usuario)
+                        if not df.empty:
+                            df_sem = calcular_horas_semanales(df.copy())
+                            if not df_sem.empty:
+                                df_sem['Usuario'] = usuario
+                                todas_semanas.append(df_sem)
+                    
+                    if todas_semanas:
+                        df_todas = pd.concat(todas_semanas, ignore_index=True)
+                        
+                        # Reorganizar y formatear
+                        df_todas['Fecha_Inicio'] = pd.to_datetime(df_todas['Fecha_Inicio']).dt.strftime('%Y-%m-%d')
+                        df_todas['Fecha_Fin'] = pd.to_datetime(df_todas['Fecha_Fin']).dt.strftime('%Y-%m-%d')
+                        
+                        # Reordenar columnas y ordenar
+                        columnas_orden = ['Año', 'Semana', 'Usuario', 'Fecha_Inicio', 'Fecha_Fin', 'Jornadas', 'Total_Horas', 'Extras', 'Deficit', 'Estado']
+                        df_todas = df_todas[columnas_orden].sort_values(['Año', 'Semana', 'Usuario'], ascending=[False, False, True])
+                        
+                        # Mostrar tabla
+                        st.dataframe(df_todas, use_container_width=True, hide_index=True)
+                        
+                        st.divider()
+                        
+                        # Estadísticas globales
+                        col1, col2, col3, col4 = st.columns(4)
+                        col1.metric("⏱️ Total Horas", f"{df_todas['Total_Horas'].sum():.2f}h")
+                        col2.metric("⚡ Total Extras", f"{df_todas['Extras'].sum():.2f}h")
+                        col3.metric("❌ Total Déficit", f"{df_todas['Deficit'].sum():.2f}h")
+                        col4.metric("📊 Promedio/Semana", f"{df_todas['Total_Horas'].mean():.2f}h")
+                        
+                        st.divider()
+                        
+                        # Resumen por usuario
+                        st.markdown("#### 👥 Totales por Usuario")
+                        resumen_usuarios_sem = df_todas.groupby('Usuario').agg({
+                            'Total_Horas': 'sum',
+                            'Extras': 'sum',
+                            'Deficit': 'sum',
+                            'Jornadas': 'sum'
+                        }).round(2)
+                        resumen_usuarios_sem.columns = ['Total Horas', 'Horas Extras', 'Horas Déficit', 'Total Jornadas']
+                        st.dataframe(resumen_usuarios_sem, use_container_width=True)
+                    else:
+                        st.info("Sin datos de jornadas registradas")
+                
+                with tab_usuario_sem:
+                    st.markdown("#### 👤 Control Semanal por Usuario")
+                    
+                    usuario_sel = st.selectbox(
+                        "Selecciona un usuario",
+                        usuarios_lista,
+                        key="admin_select_usuario_semanal"
+                    )
+                    
+                    df = cargar_datos_usuario(usuario_sel)
+                    
+                    if not df.empty:
+                        df_sem = calcular_horas_semanales(df.copy())
+                        
+                        if not df_sem.empty:
+                            # Formatear fechas
+                            df_sem['Fecha_Inicio'] = pd.to_datetime(df_sem['Fecha_Inicio']).dt.strftime('%Y-%m-%d')
+                            df_sem['Fecha_Fin'] = pd.to_datetime(df_sem['Fecha_Fin']).dt.strftime('%Y-%m-%d')
+                            
+                            # Reorganizar y ordenar
+                            columnas_orden = ['Año', 'Semana', 'Fecha_Inicio', 'Fecha_Fin', 'Jornadas', 'Total_Horas', 'Extras', 'Deficit', 'Estado']
+                            df_sem = df_sem[columnas_orden].sort_values(['Año', 'Semana'], ascending=[False, False])
+                            
+                            # Mostrar tabla
+                            st.dataframe(df_sem, use_container_width=True, hide_index=True)
+                            
+                            st.divider()
+                            
+                            # Estadísticas del usuario
+                            col1, col2, col3, col4 = st.columns(4)
+                            col1.metric("⏱️ Total Horas", f"{df_sem['Total_Horas'].sum():.2f}h")
+                            col2.metric("⚡ Total Extras", f"{df_sem['Extras'].sum():.2f}h")
+                            col3.metric("❌ Total Déficit", f"{df_sem['Deficit'].sum():.2f}h")
+                            col4.metric("📊 Promedio/Semana", f"{df_sem['Total_Horas'].mean():.2f}h")
+                            
+                            st.divider()
+                            
+                            # Última semana destacada
+                            if len(df_sem) > 0:
+                                ultima_semana = df_sem.iloc[0]
+                                st.markdown("#### 📌 Última Semana")
+                                col1, col2, col3 = st.columns(3)
+                                col1.metric("Semana", f"{int(ultima_semana['Año'])}-S{int(ultima_semana['Semana'])}")
+                                col2.metric("Horas Trabajadas", f"{ultima_semana['Total_Horas']:.2f}h")
+                                col3.metric("Estado", ultima_semana['Estado'])
+                        else:
+                            st.info(f"Sin datos de semanas para {usuario_sel}")
+                    else:
+                        st.info(f"Sin jornadas registradas para {usuario_sel}")
+            else:
+                st.info("No hay usuarios disponibles (solo admin)")
     else:
-        tab_crono, tab_manual, tab_historial = st.tabs(["⏱️ CRONÓMETRO", "📝 MANUAL", "📊 HISTORIAL"])
+        tab_crono, tab_manual, tab_historial, tab_resumen_sem = st.tabs(["⏱️ CRONÓMETRO", "📝 MANUAL", "📊 HISTORIAL", "📊 RESUMEN SEMANAL"])
         
         # TAB CRONÓMETRO
         with tab_crono:
@@ -432,6 +653,51 @@ else:
                 col1.metric("📋 Total Jornadas", len(df))
                 col2.metric("⏱️ Total Horas", f"{df['Horas'].sum():.2f}h")
                 col3.metric("📊 Promedio Diario", f"{df['Horas'].mean():.2f}h")
+            else:
+                st.info("Sin jornadas registradas aún")
+        
+        with tab_resumen_sem:
+            st.markdown("### 📊 Resumen Semanal (40h/semana)")
+            
+            df = cargar_datos_usuario(st.session_state.usuario_logeado)
+            
+            if not df.empty:
+                df_sem = calcular_horas_semanales(df.copy())
+                
+                if not df_sem.empty:
+                    # Formatear fechas
+                    df_sem['Fecha_Inicio'] = pd.to_datetime(df_sem['Fecha_Inicio']).dt.strftime('%Y-%m-%d')
+                    df_sem['Fecha_Fin'] = pd.to_datetime(df_sem['Fecha_Fin']).dt.strftime('%Y-%m-%d')
+                    
+                    # Reorganizar y ordenar
+                    columnas_orden = ['Año', 'Semana', 'Fecha_Inicio', 'Fecha_Fin', 'Jornadas', 'Total_Horas', 'Extras', 'Deficit', 'Estado']
+                    df_sem = df_sem[columnas_orden].sort_values(['Año', 'Semana'], ascending=[False, False])
+                    
+                    # Mostrar tabla
+                    st.dataframe(df_sem, use_container_width=True, hide_index=True)
+                    
+                    st.divider()
+                    
+                    # Estadísticas
+                    col1, col2, col3, col4 = st.columns(4)
+                    col1.metric("⏱️ Total Horas", f"{df_sem['Total_Horas'].sum():.2f}h")
+                    col2.metric("⚡ Extras Acumuladas", f"{df_sem['Extras'].sum():.2f}h")
+                    col3.metric("❌ Déficit Acumulado", f"{df_sem['Deficit'].sum():.2f}h")
+                    col4.metric("📊 Promedio/Semana", f"{df_sem['Total_Horas'].mean():.2f}h")
+                    
+                    st.divider()
+                    
+                    # Última semana destacada
+                    if len(df_sem) > 0:
+                        ultima_semana = df_sem.iloc[0]
+                        st.markdown("#### 📌 Última Semana")
+                        col1, col2, col3, col4 = st.columns(4)
+                        col1.metric("Semana", f"{int(ultima_semana['Año'])}-S{int(ultima_semana['Semana'])}")
+                        col2.metric("Horas Trabajadas", f"{ultima_semana['Total_Horas']:.2f}h")
+                        col3.metric("Horas Extras/Déficit", ultima_semana['Estado'])
+                        col4.metric("Jornadas", int(ultima_semana['Jornadas']))
+                else:
+                    st.info("Sin datos de semanas calculadas")
             else:
                 st.info("Sin jornadas registradas aún")
 
