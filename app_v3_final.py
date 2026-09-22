@@ -34,7 +34,7 @@ def cargar_datos_usuario(usuario):
     archivo = f"datos_usuarios/{usuario}.csv"
     if os.path.exists(archivo):
         return pd.read_csv(archivo)
-    return pd.DataFrame(columns=['Fecha', 'Entrada', 'Salida', 'Horas'])
+    return pd.DataFrame(columns=['Fecha', 'Entrada', 'Salida', 'Horas', 'Ubicacion'])
 
 def guardar_datos_usuario(usuario, df):
     df.to_csv(f"datos_usuarios/{usuario}.csv", index=False)
@@ -44,6 +44,17 @@ def formato_cronometro(segundos):
     m = int((segundos % 3600) // 60)
     s = int(segundos % 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
+
+# Ubicaciones típicas de TopRedesValencia
+UBICACIONES = [
+    "Bétera (Oficina)",
+    "Valencia",
+    "Castellón",
+    "Alicante",
+    "En ruta",
+    "Teletrabajo",
+    "Otro"
+]
 
 # ============= SESSION STATE =============
 if "usuario_logeado" not in st.session_state:
@@ -307,6 +318,22 @@ else:
             
             st.divider()
             
+            # Ubicación para cronómetro
+            col_ubi1, col_ubi2 = st.columns([2, 1])
+            with col_ubi1:
+                ubicacion_crono = st.selectbox(
+                    "📍 Ubicación de trabajo",
+                    UBICACIONES,
+                    key="crono_ubicacion"
+                )
+            with col_ubi2:
+                if ubicacion_crono == "Otro":
+                    ubicacion_crono = st.text_input(
+                        "Especifica ubicación",
+                        placeholder="Ej: Casa del cliente",
+                        key="crono_ubicacion_custom"
+                    )
+            
             if st.button("✅ REGISTRAR JORNADA", use_container_width=True, type="primary", key="btn_registrar_crono"):
                 if tiempo_total > 0:
                     horas = round(tiempo_total / 3600, 2)
@@ -319,14 +346,15 @@ else:
                         "Fecha": [ahora.strftime("%Y-%m-%d")],
                         "Entrada": [entrada.strftime("%H:%M")],
                         "Salida": [salida.strftime("%H:%M")],
-                        "Horas": [horas]
+                        "Horas": [horas],
+                        "Ubicacion": [ubicacion_crono if ubicacion_crono else "Sin especificar"]
                     })
                     df = pd.concat([df, nueva_fila], ignore_index=True)
                     guardar_datos_usuario(st.session_state.usuario_logeado, df)
                     
                     st.session_state.tiempo_pausado = 0
                     st.session_state.cronometro_activo = False
-                    st.success(f"✅ ¡Jornada registrada! ({horas}h)")
+                    st.success(f"✅ ¡Jornada registrada! ({horas}h en {ubicacion_crono})")
                     st.rerun()
                 else:
                     st.warning("⏱️ Inicia el cronómetro primero")
@@ -350,6 +378,24 @@ else:
             with col2:
                 salida_manual = st.time_input("Hora salida", value=datetime.strptime("17:00", "%H:%M").time(), key="manual_salida")
             
+            st.divider()
+            
+            # Ubicación para registro manual
+            col_ubi1, col_ubi2 = st.columns([2, 1])
+            with col_ubi1:
+                ubicacion_manual = st.selectbox(
+                    "📍 Ubicación de trabajo",
+                    UBICACIONES,
+                    key="manual_ubicacion"
+                )
+            with col_ubi2:
+                if ubicacion_manual == "Otro":
+                    ubicacion_manual = st.text_input(
+                        "Especifica ubicación",
+                        placeholder="Ej: Casa del cliente",
+                        key="manual_ubicacion_custom"
+                    )
+            
             if st.button("✅ REGISTRAR", use_container_width=True, type="primary", key="btn_registrar_manual"):
                 entrada_dt = datetime.combine(fecha_manual, entrada_manual)
                 salida_dt = datetime.combine(fecha_manual, salida_manual)
@@ -361,12 +407,13 @@ else:
                         "Fecha": [fecha_manual.strftime("%Y-%m-%d")],
                         "Entrada": [entrada_manual.strftime("%H:%M")],
                         "Salida": [salida_manual.strftime("%H:%M")],
-                        "Horas": [horas]
+                        "Horas": [horas],
+                        "Ubicacion": [ubicacion_manual if ubicacion_manual else "Sin especificar"]
                     })
                     df = pd.concat([df, nueva_fila], ignore_index=True)
                     guardar_datos_usuario(st.session_state.usuario_logeado, df)
                     
-                    st.success(f"✅ Jornada registrada ({horas}h)")
+                    st.success(f"✅ Jornada registrada ({horas}h en {ubicacion_manual})")
                     st.rerun()
                 else:
                     st.error("❌ La hora de salida debe ser posterior a la entrada")
